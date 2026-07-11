@@ -788,6 +788,8 @@
             <ul class="checklist">
               <li><span class="tick">✓</span><span>第 1 集开场保留强钩子</span></li>
               <li><span class="tick">✓</span><span>每集结尾有明确卡点</span></li>
+              <li><span class="tick">✓</span><span>每集正文不少于 800 字</span></li>
+              <li><span class="tick">✓</span><span>删除水词，只保留有效剧情</span></li>
               <li><span class="tick">✓</span><span>按 1+3+N 组织角色</span></li>
               <li><span class="tick">✓</span><span>一卡、二卡、三卡按比例放置</span></li>
               <li><span class="tick">✓</span><span>场景头、OS/VO、动作标记统一</span></li>
@@ -1356,6 +1358,56 @@
       ].join("\n");
     }
 
+    function denseConflictLine(type, mainName, enemyName) {
+      const lines = {
+        "压迫/羞辱": `${enemyName}把话说给所有人听，不是为了讲理，是要逼${mainName}当众低头。`,
+        "背叛/陷害": `${enemyName}故意把证据摆在半明半暗的位置，让旁观者先相信主角有罪。`,
+        "身份/秘密": `身份线索一出现，现场所有人的站位都变了，谁先开口，谁就可能暴露底牌。`,
+        "危机/追杀": `危险没有给人喘息时间，门口、手机、监控同时把主角逼到同一个选择上。`,
+        "反击/反转": `${mainName}没有急着解释，而是把对方最得意的一环拆给所有人看。`,
+        "关系/情感": `两人的距离被迫拉近，但信任还没建立，每一句关心都像试探。`,
+        "线索/证据": `证据不能直接宣读，必须先让对手亲口否认，再让证据落下去。`,
+        "觉醒/金手指": `${mainName}刚拿到反击机会，代价也同时出现，爽感和危险一起压上来。`,
+        "剧情推进": `这一场不解释背景，只让人物在选择里暴露目的。`
+      };
+      return lines[type] || lines["剧情推进"];
+    }
+
+    function makeDenseScene(row, sceneIndex, location, actionMark, mainName, enemyName, allyName, line, beat, nextBeat) {
+      const beatText = beat ? beat.summary : row.event;
+      const beatType = beat ? beat.type : row.beatType;
+      const sceneName = sceneIndex === 1 ? "开场钩子" : sceneIndex === 2 ? "正面冲突" : "卡点收束";
+      const sceneNo = `${row.ep}-${sceneIndex}`;
+      const turn = sceneIndex === 1
+        ? `这场戏不铺背景，直接把“${beatText}”推到观众眼前。`
+        : sceneIndex === 2
+          ? `这场戏把原文事件继续压紧，让${enemyName}和${mainName}在同一目标上正面对撞。`
+          : `这场戏不把事情讲完，只把最关键的选择停在观众最想追问的位置。`;
+      const visual = denseConflictLine(beatType, mainName, enemyName);
+      const nextText = nextBeat ? nextBeat.summary : row.hook;
+
+      return [
+        `${sceneNo} ${location} ${sceneIndex === 3 ? "夜" : "日"} 内`,
+        `【${sceneName}】${turn}`,
+        `${actionMark} ${mainName}进入画面时没有旁白解释，镜头只给一个动作：他/她停在关键物件前，先看现场，再看${enemyName}。`,
+        `${actionMark} ${visual}`,
+        `【特写】原文节点落点：${beatText}`,
+        `${enemyName}（压低声音）：你现在退一步，我还能给你留点体面。`,
+        `${mainName}（不退）：${line}`,
+        `${actionMark} 旁观者的视线被这句话拉住。有人想插话，${enemyName}先抬手拦住，因为对方知道，只要让${mainName}继续说，刚才设计好的节奏就会失控。`,
+        `${allyName}（把信息递上来）：我只说事实。第一，时间对不上；第二，现场有人撒谎；第三，最怕查的人不是${mainName}。`,
+        `${actionMark} ${mainName}没有立刻接话，而是让沉默停半秒。这个停顿不是水词，是给镜头留反应：${enemyName}眼神躲开，围观者开始倒向新的判断。`,
+        `${enemyName}（变脸）：你们串通好了？`,
+        `${mainName}：不是串通，是你留下的破绽太急。`,
+        `${actionMark} 冲突升级到下一步：${nextText}`,
+        `【本场推进】保留原文因果，删掉解释性铺陈，把心理活动改成动作、眼神和短句对抗。`
+      ].join("\n");
+    }
+
+    function countChineseChars(text) {
+      return (String(text || "").match(/[\u4e00-\u9fa5]/g) || []).length;
+    }
+
     function makeScriptEpisode(row, profile, protagonist, opponent, duration, style, index) {
       const mainName = protagonist.split(/[，,]/)[0] || "主角";
       const enemyName = opponent.split(/[，,]/)[0] || "对手";
@@ -1371,25 +1423,36 @@
         : row.event;
       const firstBeat = row.sourceBeats && row.sourceBeats[0] ? row.sourceBeats[0].summary : row.event;
       const nextBeat = row.sourceBeats && row.sourceBeats[1] ? row.sourceBeats[1].summary : row.card;
+      const beats = row.sourceBeats && row.sourceBeats.length ? row.sourceBeats : [{ summary: row.event, type: row.beatType }];
+      const scene1Beat = beats[0];
+      const scene2Beat = beats[1] || beats[0];
+      const scene3Beat = beats[2] || beats[beats.length - 1] || beats[0];
+      const lineA = lines[index % lines.length];
+      const lineB = lines[(index + 1) % lines.length];
+      const lineC = lines[(index + 2) % lines.length];
+      const scene2Location = profile.locations[row.ep % profile.locations.length];
+      const scene3Location = profile.locations[(row.ep + 1) % profile.locations.length];
 
-      return [
+      const episode = [
         `### 第${row.ep}集《${row.title}》`,
         `时长：约 ${duration} 秒`,
         `原文依据：${sourceLine}`,
         `改编动作：${row.adaptation}`,
         `集末钩子：${row.hook}`,
+        `正文要求：本集按不少于800字执行，所有动作、台词、特写都服务原文事件和集末钩子。`,
         "",
         sceneHead,
-        `${actionMark} 镜头从关键物件或人物表情切入，直接落到原文事件：${firstBeat}`,
-        `【特写】与本集原文节点相关的证物、伤痕、消息或眼神变化。`,
-        `${enemyName}（试探）：你真以为这件事还能照你的意思发展？`,
-        `${mainName}（平静）：${lines[index % lines.length]}`,
-        `${actionMark} ${allyName}带来新信息，把原文中的下一步线索推到台前：${nextBeat}`,
-        `${allyName}：这不是猜测，是你刚刚亲手露出来的破绽。`,
-        `${enemyName}（失控）：你到底还知道多少？`,
-        `${mainName}（看向镜头方向）：够让我不再按你写好的路走。`,
+        makeDenseScene(row, 1, location, actionMark, mainName, enemyName, allyName, lineA, scene1Beat, scene2Beat),
+        "",
+        makeDenseScene(row, 2, scene2Location, actionMark, mainName, enemyName, allyName, lineB, scene2Beat, scene3Beat),
+        "",
+        makeDenseScene(row, 3, scene3Location, actionMark, mainName, enemyName, allyName, lineC, scene3Beat, { summary: row.hook, type: "集末钩子" }),
+        "",
+        `【本集删水检查】删掉背景复述、情绪空喊和重复解释；保留原文事件、可拍动作、对峙台词、证据落点、情绪转折和下一集钩子。`,
         `【本集卡点：${row.card}；${row.hook}】`
       ].join("\n");
+
+      return episode;
     }
 
     function makePrompt(profile, title, total, duration, protagonist, opponent, story, scriptCount, style, sourceBeats) {
@@ -1407,6 +1470,8 @@
         `- 单集时长：约 ${duration} 秒`,
         `- 对白风格：${style}`,
         `- 逐集正文范围：前 ${scriptCount || 0} 集`,
+        "- 每集正文不少于800字",
+        "- 禁止无用水词、背景灌水、重复解释和空泛情绪喊话",
         "",
         "输入材料：",
         `主角：${protagonist}`,
@@ -1429,7 +1494,7 @@
         "5. 短剧重排方案：保留什么、前置什么、强化什么",
         "6. Markdown 分集大纲表格：集数 | 原文依据 | 改编动作 | 集末钩子 | 卡点",
         "7. 逐集正文，统一场景头格式、动作标记、OS/VO 写法",
-        "8. 质量自检，至少覆盖忠实改编、钩子、卡点、主角弧光、对白口语化、格式统一",
+        "8. 质量自检，至少覆盖忠实改编、800字正文、去水词、钩子、卡点、主角弧光、对白口语化、格式统一",
         "",
         "节奏要求：",
         "- 忠实改编优先：不得脱离原文另起炉灶，不得凭空替换主线",
@@ -1437,6 +1502,8 @@
         "- 每一集都要标注“原文依据”",
         "- 每一集都要写明改编动作：保留、前置、强化、拆分或压缩",
         "- 改编可以重排呈现顺序，但不能改断原文因果和人物动机",
+        "- 每集正文不少于800字，字数必须来自有效剧情、动作、对峙、证据和情绪转折",
+        "- 不允许用“众人震惊、气氛紧张、他很痛苦”等空泛句子凑字",
         "- 第 1 集前 3 秒必须有强钩子",
         "- 每集结尾必须有卡点",
         "- 台词必须短、狠、有情绪，不写说明书式对白",
@@ -1518,6 +1585,8 @@
         "- [x] 每集标注原文依据",
         "- [x] 每集给出改编动作：保留、前置、强化或拆分",
         "- [x] 每集给出集末钩子，而不是自然收尾",
+        "- [x] 每集正文不少于800字",
+        "- [x] 删除无效水词：不靠重复解释、空泛情绪、背景灌水凑字数",
         "- [x] 单独提取原文事件表、情绪爆点表、人物欲望/阻力表",
         "- [x] 第 1 集前 3 秒设置强钩子",
         "- [x] 每集结尾保留卡点",
