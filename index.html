@@ -730,7 +730,7 @@
                 移除
               </button>
             </div>
-            <p class="mini-note">支持 .txt / .md / .csv / .json 等纯文本。Word/PDF 请先另存为 TXT 后上传。</p>
+            <p class="mini-note">支持 .txt / .md / .csv / .json 等纯文本。上传后会自动识别剧名、题材、主角和主要对手；Word/PDF 请先另存为 TXT。</p>
           </div>
         </div>
         <div class="field">
@@ -909,6 +909,156 @@
 
     function updateUploadStatus(text) {
       $("uploadStatus").textContent = text || "未上传文件";
+    }
+
+    function escapeRegex(text) {
+      return String(text || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
+
+    function cleanFileBase(fileName) {
+      return String(fileName || "")
+        .replace(/\.[^.]+$/, "")
+        .replace(/[_-]+/g, " ")
+        .replace(/\s*(正文|剧本|小说|短剧|全文|完结|大纲|txt|md)\s*/gi, "")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
+    function detectTitle(text, fileName) {
+      const head = String(text || "").slice(0, 6000);
+      const labeled = head.match(/(?:书名|剧名|标题|片名|项目名|作品名)\s*[:：]\s*《?([^》\r\n]{2,40})》?/);
+      if (labeled) return labeled[1].replace(/[，,。；;：:]/g, "").trim();
+
+      const bracketed = [...head.matchAll(/《([^》]{2,40})》/g)]
+        .map((match) => match[1].trim())
+        .filter((item) => !/(第.+章|上一集|下一集|本集|未完|完结)/.test(item));
+      if (bracketed.length) return bracketed[0];
+
+      const firstLine = head.split(/\r?\n/).map((line) => line.trim()).find((line) =>
+        line.length >= 2 && line.length <= 28 && !/[。！？!?；;]/.test(line)
+      );
+      if (firstLine) return firstLine.replace(/^#+\s*/, "").replace(/^标题[:：]\s*/, "").trim();
+
+      return cleanFileBase(fileName);
+    }
+
+    function countHits(text, words) {
+      return words.reduce((sum, word) => {
+        const matches = String(text || "").match(new RegExp(escapeRegex(word), "g"));
+        return sum + (matches ? matches.length : 0);
+      }, 0);
+    }
+
+    function detectGenre(text) {
+      const sample = String(text || "").slice(0, 50000);
+      const scores = {
+        female: countHits(sample, ["女主", "重生", "前世", "甜宠", "穿书", "未婚夫", "妹妹", "姐姐", "豪门", "虐渣", "替嫁", "萌宝", "总裁", "夫人", "白月光"]),
+        male: countHits(sample, ["男主", "系统", "神豪", "修仙", "战神", "赘婿", "国运", "天庭", "灵气", "金手指", "打脸", "废柴", "无敌", "一招秒杀"]),
+        comedy: countHits(sample, ["搞笑", "沙雕", "反套路", "吐槽", "直播", "离谱", "社死", "笑", "弹幕", "整活"]),
+        suspense: countHits(sample, ["悬疑", "凶手", "案件", "监控", "尸体", "侦探", "刑警", "警局", "真相", "证据", "失踪", "杀人"]),
+        costume: countHits(sample, ["王爷", "侯府", "将军", "皇帝", "皇后", "太子", "朝堂", "圣旨", "宫", "江湖", "仙门", "师尊", "宗门"]),
+        drama: countHits(sample, ["正剧", "年代", "厂区", "现实", "家庭", "调解", "时代", "村委", "工厂", "医院"])
+      };
+      const ranked = Object.entries(scores).sort((a, b) => b[1] - a[1]);
+      return ranked[0][1] > 0 ? ranked[0][0] : "";
+    }
+
+    function extractNameAfterLabels(text, labels) {
+      const sample = String(text || "").slice(0, 50000);
+      for (const label of labels) {
+        const pattern = new RegExp(`${label}\\s*(?:是|叫|名叫|：|:|，|,|\\s)?\\s*([\\u4e00-\\u9fa5]{2,4})`, "g");
+        const match = pattern.exec(sample);
+        if (match && !/(一个|一名|这个|那个|自己|重生|前世|身份|设定|故事|主要|反派|对手)/.test(match[1])) {
+          return match[1];
+        }
+      }
+      return "";
+    }
+
+    function collectChineseNames(text) {
+      const sample = String(text || "").slice(0, 70000);
+      const blocked = new Set(["女主", "男主", "主角", "反派", "对手", "妹妹", "姐姐", "哥哥", "母亲", "父亲", "夫人", "王爷", "将军", "皇帝", "系统", "公司", "集团", "医院", "警局", "真相", "证据", "前世", "重生", "剧本", "小说", "故事"]);
+      const counts = new Map();
+      const matches = sample.match(/[\u4e00-\u9fa5]{2,4}/g) || [];
+      matches.forEach((name) => {
+        if (blocked.has(name)) return;
+        if (/(什么|怎么|一个|这个|那个|自己|我们|你们|他们|不是|没有|因为|所以|但是|如果|已经|突然|终于|知道|发现|开始|时候|眼前|所有|一样|回来|直接|当众|关键)/.test(name)) return;
+        counts.set(name, (counts.get(name) || 0) + 1);
+      });
+      return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([name]) => name);
+    }
+
+    function sentenceAround(text, name, fallback) {
+      if (!name) return fallback;
+      const sample = String(text || "").slice(0, 70000);
+      const index = sample.indexOf(name);
+      if (index < 0) return fallback;
+      const startCandidates = [sample.lastIndexOf("。", index), sample.lastIndexOf("\n", index), sample.lastIndexOf("；", index), sample.lastIndexOf("！", index), sample.lastIndexOf("？", index)];
+      const endCandidates = [sample.indexOf("。", index), sample.indexOf("\n", index), sample.indexOf("；", index), sample.indexOf("！", index), sample.indexOf("？", index)].filter((item) => item >= 0);
+      const start = Math.max(...startCandidates, 0);
+      const end = endCandidates.length ? Math.min(...endCandidates) : Math.min(sample.length, index + 70);
+      const sentence = sample.slice(start === 0 ? 0 : start + 1, end + 1).trim();
+      return sentence && sentence.length <= 90 ? `${name}，${sentence.replace(new RegExp(`^${escapeRegex(name)}[，,：:是\\s]*`), "")}` : fallback;
+    }
+
+    function detectRoles(text, genre) {
+      const protagonistName = extractNameAfterLabels(text, ["女主角", "男主角", "女主", "男主", "主角", "主人公", "核心主角"]);
+      const opponentName = extractNameAfterLabels(text, ["反派", "主要对手", "对手", "敌人", "恶女", "恶毒女配", "未婚夫", "仇人"]);
+      const names = collectChineseNames(text);
+      const main = protagonistName || names[0] || "";
+      let enemy = opponentName || names.find((name) => name !== main) || "";
+
+      if (main && enemy === main) {
+        enemy = names.find((name) => name !== main) || "";
+      }
+
+      const defaultMain = genre === "male"
+        ? "主角，身处低谷却获得反击机会"
+        : genre === "costume"
+          ? "主角，卷入旧案与权谋漩涡"
+          : "主角，背负旧伤却拒绝认输";
+      const defaultEnemy = genre === "suspense"
+        ? "幕后黑手，隐藏在证据链之外"
+        : genre === "costume"
+          ? "主要对手，操控朝局并掩盖旧案"
+          : "主要对手，擅长伪装与操控舆论";
+
+      return {
+        protagonist: main ? sentenceAround(text, main, `${main}，核心主角`) : defaultMain,
+        opponent: enemy ? sentenceAround(text, enemy, `${enemy}，主要对手`) : defaultEnemy
+      };
+    }
+
+    function detectProjectInfo(text, fileName) {
+      const genre = detectGenre(text);
+      const roles = detectRoles(text, genre);
+      return {
+        title: detectTitle(text, fileName),
+        genre,
+        protagonist: roles.protagonist,
+        opponent: roles.opponent
+      };
+    }
+
+    function applyDetectedInfo(info) {
+      const found = [];
+      if (info.title) {
+        $("title").value = info.title;
+        found.push(`剧名：${info.title}`);
+      }
+      if (info.genre && genreProfiles[info.genre]) {
+        $("genre").value = info.genre;
+        found.push(`题材：${genreProfiles[info.genre].label}`);
+      }
+      if (info.protagonist) {
+        $("protagonist").value = info.protagonist;
+        found.push(`主角：${info.protagonist.split("，")[0]}`);
+      }
+      if (info.opponent) {
+        $("opponent").value = info.opponent;
+        found.push(`对手：${info.opponent.split("，")[0]}`);
+      }
+      return found;
     }
 
     function stageOf(ep, total) {
@@ -1203,9 +1353,12 @@
         $("story").value = text;
         uploadedFileName = name;
         uploadedCharCount = text.length;
-        updateUploadStatus(`${name}，约 ${text.length} 字`);
+        const detected = detectProjectInfo(text, name);
+        const found = applyDetectedInfo(detected);
+        const summary = found.length ? `；已识别 ${found.join(" / ")}` : "；未识别到明确字段";
+        updateUploadStatus(`${name}，约 ${text.length} 字${summary}`);
         generate();
-        showToast("小说已导入");
+        showToast(found.length ? "小说已导入并识别" : "小说已导入");
       };
       reader.onerror = () => {
         event.target.value = "";
