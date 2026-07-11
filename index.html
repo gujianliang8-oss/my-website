@@ -894,17 +894,130 @@
 
     function splitSentences(text) {
       return text
-        .replace(/\s+/g, "")
+        .replace(/\s+/g, " ")
         .split(/[。！？!?；;]/)
         .map((item) => item.trim())
         .filter(Boolean)
-        .slice(0, 8);
+        .slice(0, 80);
     }
 
     function compactText(text, limit) {
       const cleaned = String(text || "").replace(/\s+/g, " ").trim();
       if (cleaned.length <= limit) return cleaned;
       return `${cleaned.slice(0, limit)}……（原文共 ${cleaned.length} 字，本地方案中已节选；完整内容仍保留在输入框）`;
+    }
+
+    function compactEvent(text, limit = 72) {
+      const cleaned = String(text || "")
+        .replace(/[|#*_`<>]/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (cleaned.length <= limit) return cleaned;
+      return `${cleaned.slice(0, limit)}…`;
+    }
+
+    function splitSourceChapters(text) {
+      const raw = String(text || "").replace(/\r/g, "");
+      const lines = raw.split("\n");
+      const chapters = [];
+      let current = { title: "开篇", text: "" };
+      const headingPattern = /^(第[一二三四五六七八九十百千万零\d]+[章节集回幕][^\n]{0,30}|[一二三四五六七八九十百千万零\d]+[、.．]\s*[^\n]{2,40}|Chapter\s+\d+[^\n]{0,40})$/i;
+
+      lines.forEach((line) => {
+        const trimmed = line.trim();
+        if (headingPattern.test(trimmed)) {
+          if (current.text.trim()) chapters.push(current);
+          current = { title: trimmed, text: "" };
+        } else {
+          current.text += `${line}\n`;
+        }
+      });
+      if (current.text.trim()) chapters.push(current);
+      if (chapters.length >= 2) return chapters;
+
+      const paragraphs = raw
+        .split(/\n\s*\n+/)
+        .map((item) => item.trim())
+        .filter((item) => item.length > 20);
+      if (paragraphs.length >= 4) {
+        return paragraphs.map((item, index) => ({ title: `段落${index + 1}`, text: item }));
+      }
+      return [{ title: "原文", text: raw }];
+    }
+
+    function splitSourceSentences(text) {
+      return String(text || "")
+        .replace(/\r/g, "")
+        .split(/(?<=[。！？!?；;])|\n+/)
+        .map((item) => item.replace(/\s+/g, " ").trim())
+        .filter((item) => item.length >= 8 && item.length <= 160)
+        .filter((item) => !/^(第[一二三四五六七八九十百千万零\d]+[章节集回幕]|#+|作者|简介|目录|完结|未完待续)/.test(item));
+    }
+
+    function scoreSourceSentence(sentence) {
+      const highValue = ["发现", "得知", "揭开", "暴露", "背叛", "陷害", "重生", "醒来", "死亡", "逃", "救", "杀", "抢", "夺", "逼", "威胁", "决定", "选择", "承认", "拒绝", "合作", "交易", "证据", "真相", "秘密", "身份", "婚约", "系统", "觉醒", "复仇", "报仇", "怀疑", "失踪", "出现"];
+      const dialoguePenalty = /^["“].+["”]$/.test(sentence) ? -1 : 0;
+      const lengthScore = sentence.length >= 18 && sentence.length <= 95 ? 2 : 0;
+      return countHits(sentence, highValue) * 3 + lengthScore + dialoguePenalty;
+    }
+
+    function pickChapterBeats(chapter, maxPerChapter) {
+      const sentences = splitSourceSentences(chapter.text);
+      if (!sentences.length) return [];
+      const ranked = sentences
+        .map((sentence, index) => ({ sentence, index, score: scoreSourceSentence(sentence) }))
+        .filter((item) => item.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, maxPerChapter)
+        .sort((a, b) => a.index - b.index);
+      const selected = ranked.length ? ranked : sentences.slice(0, maxPerChapter).map((sentence, index) => ({ sentence, index }));
+      return selected.map((item) => ({
+        chapter: chapter.title,
+        summary: compactEvent(item.sentence, 90),
+        original: item.sentence
+      }));
+    }
+
+    function extractNovelBeats(text, targetEpisodes) {
+      const chapters = splitSourceChapters(text);
+      const maxBeats = Math.max(targetEpisodes, Math.min(targetEpisodes * 3, 180));
+      const perChapter = chapters.length >= targetEpisodes ? 1 : Math.min(4, Math.ceil(maxBeats / Math.max(1, chapters.length)));
+      let beats = [];
+
+      chapters.forEach((chapter) => {
+        beats = beats.concat(pickChapterBeats(chapter, perChapter));
+      });
+
+      if (beats.length < Math.min(targetEpisodes, 8)) {
+        const fallback = splitSourceSentences(text)
+          .map((sentence) => ({ chapter: "原文顺序", summary: compactEvent(sentence, 90), original: sentence }))
+          .slice(0, maxBeats);
+        beats = fallback.length ? fallback : beats;
+      }
+
+      const seen = new Set();
+      return beats.filter((beat) => {
+        const key = beat.summary;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }).slice(0, maxBeats);
+    }
+
+    function beatsForEpisode(beats, ep, total) {
+      if (!beats.length) return [];
+      const start = Math.floor((ep - 1) * beats.length / total);
+      const end = Math.max(start + 1, Math.floor(ep * beats.length / total));
+      return beats.slice(start, end);
+    }
+
+    function makeSourceAnalysis(beats) {
+      if (!beats.length) return "未提取到清晰剧情节点，请检查上传文本是否为纯文本小说正文。";
+      const preview = beats.slice(0, 18).map((beat, index) =>
+        `${index + 1}. 【${beat.chapter}】${beat.summary}`
+      );
+      const suffix = beats.length > preview.length ? `\n... 共提取 ${beats.length} 个节点，分集大纲会按原文顺序继续使用。` : "";
+      return preview.join("\n") + suffix;
     }
 
     function updateUploadStatus(text) {
@@ -1090,22 +1203,19 @@
       return `${list[(ep - 1) % list.length]}第${ep}步`;
     }
 
-    function makeOutline(total, profile, protagonist, opponent, storySeeds) {
+    function makeOutline(total, profile, protagonist, opponent, sourceBeats) {
       const rows = [];
       for (let ep = 1; ep <= total; ep += 1) {
         const stage = stageOf(ep, total);
-        const seed = storySeeds[(ep - 1) % Math.max(1, storySeeds.length)] || profile.hook;
-        const focus = ep === 1
-          ? profile.hook
-          : stage === "建立"
-            ? `主角围绕“${seed}”拿到第一块主动权`
-            : stage === "升级"
-              ? `${opponent.split("，")[0]}加码压迫，主角用旧线索反制`
-              : `所有线索回到核心真相，主角逼近最终选择`;
+        const episodeBeats = beatsForEpisode(sourceBeats, ep, total);
+        const beatText = episodeBeats.map((beat) => beat.summary).join(" / ");
+        const focus = beatText || (ep === 1 ? profile.hook : `${opponent.split("，")[0]}推动新冲突，主角继续追索真相`);
+        const titleSeed = episodeBeats[0] ? episodeBeats[0].summary.replace(/[“”"《》]/g, "") : episodeTitle(ep, stage, profile);
         rows.push({
           ep,
-          title: episodeTitle(ep, stage, profile),
+          title: compactEvent(titleSeed, 14),
           event: focus,
+          sourceBeats: episodeBeats,
           card: cardLabel(ep, total, profile)
         });
       }
@@ -1132,26 +1242,35 @@
       const sceneHead = activeFormat === "横屏"
         ? `场景-${row.ep}\n地点：${location} - 日 -（内景）`
         : `${row.ep}-1\n地点：${location} - 日 -（内景）`;
+      const sourceLine = row.sourceBeats && row.sourceBeats.length
+        ? row.sourceBeats.map((beat) => beat.summary).join("；")
+        : row.event;
+      const firstBeat = row.sourceBeats && row.sourceBeats[0] ? row.sourceBeats[0].summary : row.event;
+      const nextBeat = row.sourceBeats && row.sourceBeats[1] ? row.sourceBeats[1].summary : row.card;
 
       return [
         `### 第${row.ep}集《${row.title}》`,
         `时长：约 ${duration} 秒`,
+        `原文依据：${sourceLine}`,
         "",
         sceneHead,
-        `${actionMark} 人群的议论声压低又抬高，镜头推近${mainName}的眼睛。`,
-        `【特写】一件关键物证被攥在掌心，边缘划出一道细小红痕。`,
-        `${enemyName}（压着笑）：你现在认错，还来得及。`,
+        `${actionMark} 镜头从关键物件或人物表情切入，直接落到原文事件：${firstBeat}`,
+        `【特写】与本集原文节点相关的证物、伤痕、消息或眼神变化。`,
+        `${enemyName}（试探）：你真以为这件事还能照你的意思发展？`,
         `${mainName}（平静）：${lines[index % lines.length]}`,
-        `${actionMark} ${allyName}从人群后方出现，把一份刚打印出的材料递到桌面。`,
-        `${allyName}：时间、账号、原始文件，全在这里。`,
-        `${enemyName}（变脸）：这东西你从哪来的？`,
-        `${mainName}（看向众人）：从你以为我永远不会回头查的地方。`,
+        `${actionMark} ${allyName}带来新信息，把原文中的下一步线索推到台前：${nextBeat}`,
+        `${allyName}：这不是猜测，是你刚刚亲手露出来的破绽。`,
+        `${enemyName}（失控）：你到底还知道多少？`,
+        `${mainName}（看向镜头方向）：够让我不再按你写好的路走。`,
         `【本集卡点：${row.card}】`
       ].join("\n");
     }
 
-    function makePrompt(profile, title, total, duration, protagonist, opponent, story, scriptCount, style) {
+    function makePrompt(profile, title, total, duration, protagonist, opponent, story, scriptCount, style, sourceBeats) {
       const promptStory = compactText(story, 12000);
+      const beatList = sourceBeats && sourceBeats.length
+        ? sourceBeats.slice(0, 60).map((beat, index) => `${index + 1}. 【${beat.chapter}】${beat.summary}`).join("\n")
+        : "未提取到明确节点，请先通读原文再改编。";
       return [
         `请使用 short-drama-script 的标准，帮我生成短剧《${title}》。`,
         "",
@@ -1167,6 +1286,10 @@
         `主角：${protagonist}`,
         `主要对手：${opponent}`,
         uploadedFileName ? `上传文件：${uploadedFileName}（约 ${uploadedCharCount} 字）` : "上传文件：无",
+        "",
+        "必须严格遵循的原文剧情节点：",
+        beatList,
+        "",
         `故事材料：${promptStory}`,
         "",
         "输出结构必须包含：",
@@ -1178,6 +1301,9 @@
         "6. 质量自检，至少覆盖钩子、卡点、主角弧光、对白口语化、格式统一",
         "",
         "节奏要求：",
+        "- 忠实改编优先：不得脱离原文另起炉灶，不得凭空替换主线",
+        "- 分集大纲必须按原文事件先后顺序推进",
+        "- 每一集都要标注“原文依据”",
         "- 第 1 集前 3 秒必须有强钩子",
         "- 每集结尾必须有卡点",
         "- 一卡放在全剧 1/3 处，二卡放在 2/3 处，三卡放在收尾前",
@@ -1196,9 +1322,11 @@
       const protagonist = sanitize($("protagonist").value, "主角，背负旧伤却拒绝认输");
       const opponent = sanitize($("opponent").value, "主要对手，擅长伪装与操控舆论");
       const story = sanitize($("story").value, "主角在关键节点重获主动权，一步步揭开真相。");
-      const storyBrief = compactText(story, 520);
-      const seeds = splitSentences(story);
-      const outline = makeOutline(total, profile, protagonist, opponent, seeds);
+      const sourceBeats = extractNovelBeats(story, total);
+      const storyBrief = sourceBeats.length
+        ? sourceBeats.slice(0, 8).map((beat) => beat.summary).join("；")
+        : compactText(story, 520);
+      const outline = makeOutline(total, profile, protagonist, opponent, sourceBeats);
       const scripts = outline.slice(0, Math.max(0, scriptCount)).map((row, index) =>
         makeScriptEpisode(row, profile, protagonist, opponent, duration, style, index)
       );
@@ -1221,18 +1349,23 @@
         uploadedFileName ? `- 上传原文：${uploadedFileName}（约 ${uploadedCharCount} 字）` : "- 上传原文：无",
         "",
         "## 2. 故事梗概",
-        `本剧以“${profile.hook}”作为开场钩子。原始材料要点：${storyBrief} 全剧围绕主角与主要对手之间的核心冲突展开，让主角从被动承受走向主动选择。前段建立人设与压迫，中段通过证物、关系与舆论不断升级，后段回收旧案与情感线，在最终卡点中完成反击、真相揭露与主题升华。`,
+        `本剧以原文开篇和核心冲突为基础进行短剧化改编，不另起主线。原始剧情主线依次为：${storyBrief}。改编时只强化钩子、卡点和可拍摄动作，人物关系与关键事件遵循上传文本。`,
         "",
-        "## 3. 人物小传",
+        "## 3. 原文剧情节点提取",
+        makeSourceAnalysis(sourceBeats),
+        "",
+        "## 4. 人物小传",
         makeCharacters(profile, protagonist, opponent),
         "",
-        "## 4. 分集大纲",
+        "## 5. 分集大纲",
         outlineTable,
         "",
-        "## 5. 逐集正文",
+        "## 6. 逐集正文",
         scripts.length ? scripts.join("\n\n") : "本次选择只生成大纲，未生成正文样稿。",
         "",
-        "## 6. 质量自检",
+        "## 7. 质量自检",
+        "- [x] 分集大纲按原文剧情节点顺序推进",
+        "- [x] 每集标注原文依据",
         "- [x] 第 1 集前 3 秒设置强钩子",
         "- [x] 每集结尾保留卡点",
         "- [x] 一卡、二卡、三卡按比例放置",
@@ -1241,7 +1374,7 @@
         "- [x] 对白以口语化和情绪推进为主"
       ].join("\n");
 
-      currentPrompt = makePrompt(profile, title, total, duration, protagonist, opponent, story, scriptCount, style);
+      currentPrompt = makePrompt(profile, title, total, duration, protagonist, opponent, story, scriptCount, style, sourceBeats);
       $("episodes").value = total;
       $("metricEpisodes").textContent = total;
       $("metricScripts").textContent = Math.max(0, scriptCount);
