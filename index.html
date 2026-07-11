@@ -972,6 +972,52 @@
       return countHits(sentence, highValue) * 3 + lengthScore + dialoguePenalty;
     }
 
+    function classifyBeat(sentence) {
+      const text = String(sentence || "");
+      const checks = [
+        { type: "压迫/羞辱", words: ["羞辱", "辱骂", "嘲笑", "逼", "跪", "打", "骂", "欺负", "看不起", "赶出", "污蔑"] },
+        { type: "背叛/陷害", words: ["背叛", "陷害", "算计", "嫁祸", "下药", "偷走", "冒名", "夺走", "背刺"] },
+        { type: "身份/秘密", words: ["身份", "秘密", "真相", "亲生", "血缘", "身世", "隐藏", "发现", "揭开"] },
+        { type: "危机/追杀", words: ["危机", "追杀", "逃", "死", "死亡", "火海", "车祸", "失踪", "绑架", "威胁"] },
+        { type: "反击/反转", words: ["反击", "复仇", "报仇", "证明", "打脸", "反转", "揭穿", "夺回", "赢"] },
+        { type: "关系/情感", words: ["爱", "恨", "婚约", "未婚夫", "喜欢", "心疼", "保护", "合作", "误会", "拥抱"] },
+        { type: "线索/证据", words: ["证据", "线索", "文件", "录音", "监控", "鉴定", "合同", "名单", "照片"] },
+        { type: "觉醒/金手指", words: ["重生", "醒来", "系统", "觉醒", "能力", "金手指", "穿越", "回到"] }
+      ];
+      const ranked = checks.map((item) => ({ type: item.type, score: countHits(text, item.words) }))
+        .sort((a, b) => b.score - a.score);
+      return ranked[0].score > 0 ? ranked[0].type : "剧情推进";
+    }
+
+    function hookFromBeat(beat, ep, total, profile) {
+      const type = beat ? beat.type : "剧情推进";
+      const summary = beat ? beat.summary : profile.hook;
+      const templates = {
+        "压迫/羞辱": `羞辱没有结束，${summary}后对方继续加码`,
+        "背叛/陷害": `陷害刚露出破绽，却牵出更大的幕后人`,
+        "身份/秘密": `身份线索只揭开一半，真正证据被人抢先拿走`,
+        "危机/追杀": `危机解除前一秒，新危险已经贴到主角身边`,
+        "反击/反转": `主角刚反击成功，却发现胜利是对手故意放出的局`,
+        "关系/情感": `关系刚靠近，误会或代价立刻横在两人之间`,
+        "线索/证据": `证据出现，但最关键的一页消失了`,
+        "觉醒/金手指": `能力刚启动，却暴露出无法承受的副作用`,
+        "剧情推进": `本集事件未真正结束，下一步将改变局势`
+      };
+      if (ep === 1) return `首集钩子：用“${summary}”直接开场，结尾抛出更大危机`;
+      if (ep === total) return "终集钩子：主线收束，但保留续集新问题";
+      return templates[type] || templates["剧情推进"];
+    }
+
+    function adaptationMoveForBeat(beat, ep, total) {
+      if (!beat) return "保留主线，补足可拍摄动作";
+      if (ep === 1) return "前置为开场强钩子，删掉铺垫，先给情绪冲击";
+      if (/压迫|背叛|危机|觉醒/.test(beat.type)) return "保留原文因果，放大冲突强度和现场压迫";
+      if (/身份|线索/.test(beat.type)) return "拆成可见证物、对峙台词和结尾信息差";
+      if (/关系/.test(beat.type)) return "压缩心理描写，改成动作、眼神和短句拉扯";
+      if (/反击/.test(beat.type)) return "保留反击结果，把胜利前一秒切成集末卡点";
+      return "按原文顺序保留事件，短剧化为一个主冲突";
+    }
+
     function pickChapterBeats(chapter, maxPerChapter) {
       const sentences = splitSourceSentences(chapter.text);
       if (!sentences.length) return [];
@@ -985,7 +1031,9 @@
       return selected.map((item) => ({
         chapter: chapter.title,
         summary: compactEvent(item.sentence, 90),
-        original: item.sentence
+        original: item.sentence,
+        type: classifyBeat(item.sentence),
+        score: scoreSourceSentence(item.sentence)
       }));
     }
 
@@ -1001,7 +1049,7 @@
 
       if (beats.length < Math.min(targetEpisodes, 8)) {
         const fallback = splitSourceSentences(text)
-          .map((sentence) => ({ chapter: "原文顺序", summary: compactEvent(sentence, 90), original: sentence }))
+          .map((sentence) => ({ chapter: "原文顺序", summary: compactEvent(sentence, 90), original: sentence, type: classifyBeat(sentence), score: scoreSourceSentence(sentence) }))
           .slice(0, maxBeats);
         beats = fallback.length ? fallback : beats;
       }
@@ -1025,7 +1073,7 @@
     function makeSourceAnalysis(beats) {
       if (!beats.length) return "未提取到清晰剧情节点，请检查上传文本是否为纯文本小说正文。";
       const preview = beats.slice(0, 18).map((beat, index) =>
-        `${index + 1}. 【${beat.chapter}】${beat.summary}`
+        `${index + 1}. 【${beat.chapter}｜${beat.type || "剧情推进"}】${beat.summary}`
       );
       const suffix = beats.length > preview.length ? `\n... 共提取 ${beats.length} 个节点，分集大纲会按原文顺序继续使用。` : "";
       return preview.join("\n") + suffix;
@@ -1033,6 +1081,61 @@
 
     function makeHitMethodology() {
       return hitDramaRules.map((rule, index) => `${index + 1}. ${rule}`).join("\n");
+    }
+
+    function makeEventTable(beats) {
+      if (!beats.length) return "未提取到原文事件。";
+      return [
+        "| 序号 | 原文位置 | 事件类型 | 原文事件 | 短剧处理 |",
+        "|---:|---|---|---|---|",
+        ...beats.slice(0, 30).map((beat, index) =>
+          `| ${index + 1} | ${beat.chapter} | ${beat.type || "剧情推进"} | ${beat.summary} | ${adaptationMoveForBeat(beat, index + 1, beats.length)} |`
+        )
+      ].join("\n");
+    }
+
+    function makeEmotionTable(beats) {
+      const emotional = beats
+        .filter((beat) => /压迫|背叛|危机|反击|身份|觉醒|关系/.test(beat.type || ""))
+        .slice(0, 12);
+      if (!emotional.length) return "未提取到明显情绪爆点，需要人工从原文中补充羞辱、背叛、反击、身份反转等场面。";
+      return [
+        "| 爆点 | 情绪价值 | 可前置位置 | 钩子设计 |",
+        "|---|---|---|---|",
+        ...emotional.map((beat, index) =>
+          `| ${beat.summary} | ${beat.type} | 第${index + 1}集或大卡点 | ${hookFromBeat(beat, index + 1, emotional.length, genreProfiles[$("genre").value] || genreProfiles.female)} |`
+        )
+      ].join("\n");
+    }
+
+    function makeCharacterDriveTable(protagonist, opponent, beats) {
+      const mainName = protagonist.split(/[，,]/)[0] || "主角";
+      const enemyName = opponent.split(/[，,]/)[0] || "主要对手";
+      const firstSecret = beats.find((beat) => /身份|线索|证据|秘密/.test(beat.type || "")) || beats[0];
+      const firstPressure = beats.find((beat) => /压迫|背叛|危机/.test(beat.type || "")) || beats[1] || beats[0];
+      return [
+        "| 角色 | 外部目标 | 内在需求 | 阻力 | 可拍摄表现 |",
+        "|---|---|---|---|---|",
+        `| ${mainName} | 解决“${firstSecret ? firstSecret.summary : "核心真相"}” | 从被动承受变成主动选择 | ${enemyName}制造信息差和情绪压迫 | 盯证物、短句反击、当众做选择 |`,
+        `| ${enemyName} | 阻止主角逼近真相或夺回主动权 | 维持表面优势与控制感 | 原文节点不断暴露破绽 | 逼迫、否认、转移矛盾、制造新危机 |`,
+        `| 关键盟友/CP | 提供资源、证据或情绪支撑 | 与主角建立信任 | ${firstPressure ? firstPressure.summary : "旧误会或外部压力"} | 递证据、挡伤害、在卡点前后出场 |`
+      ].join("\n");
+    }
+
+    function makeReorderPlan(beats, total, profile) {
+      if (!beats.length) return "没有足够原文节点，无法生成重排方案。";
+      const first = beats.find((beat) => /压迫|背叛|危机|觉醒/.test(beat.type || "")) || beats[0];
+      const one = beats[Math.max(0, Math.floor(beats.length / 3) - 1)];
+      const two = beats[Math.max(0, Math.floor(beats.length * 2 / 3) - 1)];
+      const end = beats[beats.length - 1];
+      return [
+        `- 第1集开场：前置“${first.summary}”，先给情绪冲击，再补前因。`,
+        `- 前30%：保留原文早期主线，围绕“${one.summary}”建立第一轮大反转。`,
+        `- 中段升级：把线索、误会、关系拉扯交替推进，避免连续解释设定。`,
+        `- 2/3大卡：围绕“${two.summary}”制造正面对抗和胜负未定。`,
+        `- 收尾：回到“${end.summary}”，完成主题选择，并留一个新问题。`,
+        `- 题材适配：按“${profile.label}”强化${profile.cardTypes.join("、")}。`
+      ].join("\n");
     }
 
     function updateUploadStatus(text) {
@@ -1226,11 +1329,17 @@
         const beatText = episodeBeats.map((beat) => beat.summary).join(" / ");
         const focus = beatText || (ep === 1 ? profile.hook : `${opponent.split("，")[0]}推动新冲突，主角继续追索真相`);
         const titleSeed = episodeBeats[0] ? episodeBeats[0].summary.replace(/[“”"《》]/g, "") : episodeTitle(ep, stage, profile);
+        const leadBeat = episodeBeats[0] || null;
+        const hook = hookFromBeat(leadBeat, ep, total, profile);
+        const adaptation = adaptationMoveForBeat(leadBeat, ep, total);
         rows.push({
           ep,
           title: compactEvent(titleSeed, 14),
           event: focus,
           sourceBeats: episodeBeats,
+          beatType: leadBeat ? leadBeat.type : "剧情推进",
+          adaptation,
+          hook,
           card: cardLabel(ep, total, profile)
         });
       }
@@ -1267,6 +1376,8 @@
         `### 第${row.ep}集《${row.title}》`,
         `时长：约 ${duration} 秒`,
         `原文依据：${sourceLine}`,
+        `改编动作：${row.adaptation}`,
+        `集末钩子：${row.hook}`,
         "",
         sceneHead,
         `${actionMark} 镜头从关键物件或人物表情切入，直接落到原文事件：${firstBeat}`,
@@ -1277,14 +1388,14 @@
         `${allyName}：这不是猜测，是你刚刚亲手露出来的破绽。`,
         `${enemyName}（失控）：你到底还知道多少？`,
         `${mainName}（看向镜头方向）：够让我不再按你写好的路走。`,
-        `【本集卡点：${row.card}】`
+        `【本集卡点：${row.card}；${row.hook}】`
       ].join("\n");
     }
 
     function makePrompt(profile, title, total, duration, protagonist, opponent, story, scriptCount, style, sourceBeats) {
       const promptStory = compactText(story, 12000);
       const beatList = sourceBeats && sourceBeats.length
-        ? sourceBeats.slice(0, 60).map((beat, index) => `${index + 1}. 【${beat.chapter}】${beat.summary}`).join("\n")
+        ? sourceBeats.slice(0, 60).map((beat, index) => `${index + 1}. 【${beat.chapter}｜${beat.type || "剧情推进"}】${beat.summary}`).join("\n")
         : "未提取到明确节点，请先通读原文再改编。";
       return [
         `请使用 short-drama-script 的标准，帮我生成短剧《${title}》。`,
@@ -1312,16 +1423,20 @@
         "",
         "输出结构必须包含：",
         "1. 基础信息",
-        "2. 200-500 字故事梗概",
-        "3. 1+3+N 人物小传",
-        "4. Markdown 分集大纲表格：集数 | 标题 | 核心事件 | 卡点",
-        "5. 逐集正文，统一场景头格式、动作标记、OS/VO 写法",
-        "6. 质量自检，至少覆盖钩子、卡点、主角弧光、对白口语化、格式统一",
+        "2. 原文事件表：原文位置 | 事件类型 | 原文事件 | 短剧处理",
+        "3. 情绪爆点表：爆点 | 情绪价值 | 可前置位置 | 钩子设计",
+        "4. 人物欲望/阻力表",
+        "5. 短剧重排方案：保留什么、前置什么、强化什么",
+        "6. Markdown 分集大纲表格：集数 | 原文依据 | 改编动作 | 集末钩子 | 卡点",
+        "7. 逐集正文，统一场景头格式、动作标记、OS/VO 写法",
+        "8. 质量自检，至少覆盖忠实改编、钩子、卡点、主角弧光、对白口语化、格式统一",
         "",
         "节奏要求：",
         "- 忠实改编优先：不得脱离原文另起炉灶，不得凭空替换主线",
         "- 分集大纲必须按原文事件先后顺序推进",
         "- 每一集都要标注“原文依据”",
+        "- 每一集都要写明改编动作：保留、前置、强化、拆分或压缩",
+        "- 改编可以重排呈现顺序，但不能改断原文因果和人物动机",
         "- 第 1 集前 3 秒必须有强钩子",
         "- 每集结尾必须有卡点",
         "- 台词必须短、狠、有情绪，不写说明书式对白",
@@ -1351,9 +1466,9 @@
         makeScriptEpisode(row, profile, protagonist, opponent, duration, style, index)
       );
       const outlineTable = [
-        "| 集数 | 标题 | 核心事件 | 卡点 |",
-        "|---:|---|---|---|",
-        ...outline.map((row) => `| ${row.ep} | ${row.title} | ${row.event} | ${row.card} |`)
+        "| 集数 | 标题 | 原文依据 | 事件类型 | 改编动作 | 集末钩子 | 卡点 |",
+        "|---:|---|---|---|---|---|---|",
+        ...outline.map((row) => `| ${row.ep} | ${row.title} | ${row.event} | ${row.beatType} | ${row.adaptation} | ${row.hook} | ${row.card} |`)
       ].join("\n");
 
       currentScript = [
@@ -1374,21 +1489,36 @@
         "## 3. 原文剧情节点提取",
         makeSourceAnalysis(sourceBeats),
         "",
-        "## 4. 爆款方法论应用",
+        "## 4. 原文事件表",
+        makeEventTable(sourceBeats),
+        "",
+        "## 5. 情绪爆点表",
+        makeEmotionTable(sourceBeats),
+        "",
+        "## 6. 人物欲望/阻力表",
+        makeCharacterDriveTable(protagonist, opponent, sourceBeats),
+        "",
+        "## 7. 短剧重排方案",
+        makeReorderPlan(sourceBeats, total, profile),
+        "",
+        "## 8. 爆款方法论应用",
         makeHitMethodology(),
         "",
-        "## 5. 人物小传",
+        "## 9. 人物小传",
         makeCharacters(profile, protagonist, opponent),
         "",
-        "## 6. 分集大纲",
+        "## 10. 分集大纲",
         outlineTable,
         "",
-        "## 7. 逐集正文",
+        "## 11. 逐集正文",
         scripts.length ? scripts.join("\n\n") : "本次选择只生成大纲，未生成正文样稿。",
         "",
-        "## 8. 质量自检",
+        "## 12. 质量自检",
         "- [x] 分集大纲按原文剧情节点顺序推进",
         "- [x] 每集标注原文依据",
+        "- [x] 每集给出改编动作：保留、前置、强化或拆分",
+        "- [x] 每集给出集末钩子，而不是自然收尾",
+        "- [x] 单独提取原文事件表、情绪爆点表、人物欲望/阻力表",
         "- [x] 第 1 集前 3 秒设置强钩子",
         "- [x] 每集结尾保留卡点",
         "- [x] 开篇少铺陈，直接给主题、冲突和情绪",
